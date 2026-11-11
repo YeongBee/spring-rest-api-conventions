@@ -1,0 +1,139 @@
+Claude Code는 단순한 CLI 챗봇을 넘어 메모리(CLAUDE.md), 온디맨드 전문 지식(Skills), 컨텍스트 격리(Subagents), 결정론적 통제(Hooks), 보안 경계(Permissions)가 결합된 에이전트 하네스(Agent Harness) 아키텍처로 동작합니다.
+실무에서 바로 적용할 수 있도록 기본 설정부터 하네스 엔지니어링, 최신 스킬·훅·권한 설정까지 완벽하게 정리해 드립니다.
+1. 하네스(Harness) 아키텍처 핵심 개념: 무엇을 어디에 설정할까?
+최근 Claude Code 활용의 핵심은 "프롬프트에 모든 것을 넣지 않고, 역할에 맞는 레이어(Harness)로 분리하는 것"입니다.
+ * CLAUDE.md (상시 메모리): 에이전트가 항상 알아야 하는 프로젝트 기본 규칙(기술 스택, 빌드 명령어, 코딩 컨벤션). 모든 턴마다 컨텍스트 토큰을 소모하므로 핵심만 간결하게 유지해야 합니다.
+ * Skills (온디맨드 지식): 특정 작업을 할 때만 필요에 따라 로드되는(On-demand) 매뉴얼이나 절차(예: DB 마이그레이션 규칙, 릴리즈 체크리스트). 평소에는 description만 읽히고 본문은 작업 매칭 시에만 로드되어 토큰을 아껴줍니다.
+ * Hooks (하네스 강제 통제): LLM의 판단에 맡기지 않고 100% 결정론적으로 실행되어야 하는 OS 레벨 스크립트(예: 파일 수정 후 자동 린트 실행, .env 수정 원천 차단).
+ * Subagents (컨텍스트 격리): 메인 대화창의 컨텍스트가 오염되지 않도록 독립된 공간에서 무거운 작업을 위임받는 전문 에이전트(예: 코드 리뷰어, 대규모 로그 분석기).
+ * Permissions (보안 및 실행 권한): 에이전트가 묻지 않고 실행할 수 있는 것과 절대 실행할 수 없는 것을 지정하는 보안 경계(settings.json).
+2. 설정 파일 구조 및 우선순위 (Settings Hierarchy)
+Claude Code는 설정 파일의 위치에 따라 적용 범위를 구분합니다.
+ * ~/.claude/settings.json (사용자 전역 설정): 내 PC의 모든 프로젝트에 공통 적용되는 개인 선호 설정(기본 모델, 테마, 개인 전역 권한 등).
+ * .claude/settings.json (팀 공유 프로젝트 설정): Git 저장소에 커밋하여 팀원 전체가 공유하는 권한 규칙, Hooks, 플러그인 설정.
+ * .claude/settings.local.json (개인 로컬 오버라이드): Git에 커밋하지 않는(.gitignore 처리) 개인별 예외 설정. 작업 중 "Yes, and don't ask again"을 선택하면 이곳에 자동으로 allow 규칙이 추가됩니다.
+ * ~/.claude.json (내부 상태 파일): 계정 정보, MCP 서버 설정, 폴더 신뢰(Trust) 여부 등을 Claude Code가 직접 기록하는 파일(수동 편집 불필요).
+3. 권한 설정 (Permissions) 완벽 가이드
+매번 승인 프롬프트가 뜨는 피로도를 줄이면서 보안을 유지하려면 .claude/settings.json에 allow(자동 승인), ask(항상 확인), deny(절대 차단) 규칙을 세밀하게 정의해야 합니다.
+권한 모드 (Permission Modes)
+작업 중 Shift + Tab을 눌러 실시간으로 모드를 전환할 수 있습니다.
+ * default (manual): 기본 모드. 허용되지 않은 파일 수정이나 Bash 실행 시 승인 요청.
+ * acceptEdits: 파일 생성/수정(Edit, Write)은 자동 승인하되, Bash 명령어는 확인.
+ * plan: 코드를 수정하지 않고 아키텍처 설계 및 실행 계획만 수립.
+ * auto / bypassPermissions: 지정된 안전 범위 또는 전체 권한을 위임하여 무인 실행 (컨테이너/샌드박스 환경에서만 권장).
+실전 .claude/settings.json 권한 설정 예시
+{
+  "permissions": {
+    "defaultMode": "default",
+    "allow": [
+      "Read",
+      "Grep",
+      "Glob",
+      "Bash(npm run test*)",
+      "Bash(npm run lint*)",
+      "Bash(git status)",
+      "Bash(git diff*)",
+      "Bash(git log*)"
+    ],
+    "ask": [
+      "Bash(git push*)",
+      "Bash(git commit*)",
+      "Bash(npm install*)"
+    ],
+    "deny": [
+      "Read(.env*)",
+      "Read(./secrets/**)",
+      "Edit(.env*)",
+      "Write(.env*)",
+      "Bash(rm -rf *)",
+      "Bash(curl *)"
+    ]
+  }
+}
+
+ * 팁: Bash(npm test *)처럼 와일드카드(*)를 사용해 특정 명령어 패턴만 안전하게 열어줄 수 있습니다.
+4. 최신 스킬 (Agent Skills) 설정 및 작성법
+과거의 단순 슬래시 명령어(.claude/commands/)를 발전시킨 Skills(SKILL.md)는 사용자가 명시적으로 호출하지 않아도 Claude가 작업 문맥을 파악해 자동으로 로드하는 기능입니다.
+디렉토리 구조
+ * 프로젝트 스킬: .claude/skills/<스킬이름>/SKILL.md (팀 공유용)
+ * 개인 전역 스킬: ~/.claude/skills/<스킬이름>/SKILL.md
+ * 같은 폴더 안에 보조 문서, 템플릿 파일, 실행 스크립트를 함께 넣어두고 SKILL.md에서 참조하게 할 수 있습니다.
+SKILL.md 작성 예시 (.claude/skills/db-migration/SKILL.md)
+가장 중요한 것은 프론트매터의 description입니다. description은 단순 설명이 아니라 스킬을 발동시키는 트리거(Trigger) 역할을 하므로 언제 이 스킬을 써야 하는지 구체적으로 적어야 합니다.
+---
+name: db-migration
+description: 데이터베이스 스키마 변경, 테이블 생성/수정, 마이그레이션 파일 작성 또는 쿼리 인덱스 최적화 요청 시 반드시 사용합니다.
+---
+
+# DB 마이그레이션 및 스키마 작성 규칙
+
+1. **네이밍 규칙:** 모든 테이블과 컬럼명은 `snake_case`를 사용합니다.
+2. **하위 호환성:** 기존 컬럼을 즉시 삭제(`DROP`)하지 말고, 먼저 Deprecated 주석을 달고 2단계로 분리하세요.
+3. **검증 절차:**
+   - 마이그레이션 파일 생성 후 반드시 로컬 드라이런 명령어를 실행해 문법 오류를 검증하세요.
+   - 인덱스를 추가할 때는 대용량 테이블 락(Lock) 방지를 위해 `CONCURRENTLY` 옵션을 고려하세요.
+
+5. 하네스 엔지니어링의 핵심: Hooks 설정
+LLM은 확률적 모델이라 CLAUDE.md에 "절대 .env를 건드리지 마"라고 적어도 컨텍스트가 길어지면 어길 수 있습니다. Hooks는 Claude의 생명주기(Lifecycle) 이벤트에 쉘 스크립트를 걸어 모델의 의지와 상관없이 시스템 레벨에서 강제 실행합니다.
+주요 Hook 이벤트
+ * SessionStart: 세션 시작, 재개, 또는 /compact(컨텍스트 압축) 직후 실행.
+ * UserPromptSubmit: 사용자가 프롬프트를 입력했을 때 실행.
+ * PreToolUse: 도구가 실행되기 직전에 가로채서 검사 (종료 코드 exit 2를 반환하면 도구 실행을 즉시 차단하고 stderr 메시지를 Claude에게 피드백함. 주의: exit 1은 차단되지 않음).
+ * PostToolUse: 파일 수정이나 명령 실행이 끝난 직후 실행 (자동 포매팅/린트에 최적).
+ * Stop: Claude가 답변을 마치고 멈추려 할 때 실행 (exit 2 반환 시 테스트 통과 전까지 멈추지 못하게 재작업 강제 가능).
+ * Notification: Claude가 권한 승인을 기다리거나 입력이 필요할 때 OS 알림 전송.
+실전 Hook 설정 예시 (.claude/settings.json)
+예시 1: 중요 파일 수정 원천 차단 (PreToolUse) + 컨텍스트 압축 후 핵심 규칙 재주입 (SessionStart)
+{
+  "hooks": {
+    "PreToolUse": [
+      {
+        "matcher": "Edit|Write",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "\"$CLAUDE_PROJECT_DIR\"/.claude/hooks/protect-files.sh"
+          }
+        ]
+      }
+    ],
+    "SessionStart": [
+      {
+        "matcher": "compact",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "echo '리마인더: 패키지 매니저는 npm 대신 pnpm을 사용하고, 커밋 전 테스트를 반드시 통과시키세요.'"
+          }
+        ]
+      }
+    ]
+  }
+}
+
+ * .claude/hooks/protect-files.sh 작성 후 chmod +x로 실행 권한을 부여해야 하며, 설정 후 채팅창에 /hooks를 입력해 정상 등록 여부를 확인할 수 있습니다.
+6. 커스텀 서브에이전트 (Subagents) 설정
+복잡한 코드 탐색이나 코드 리뷰를 메인 대화에서 진행하면 컨텍스트가 금방 차버립니다. .claude/agents/(프로젝트) 또는 ~/.claude/agents/(전역)에 마크다운 파일을 만들어 서브에이전트를 정의할 수 있습니다.
+서브에이전트 작성 예시 (.claude/agents/code-reviewer.md)
+서브에이전트별로 사용할 모델(model)과 허용 도구(tools)를 제한하여 읽기 전용 에이전트로 만들 수 있습니다.
+---
+name: code-reviewer
+description: 코드 작성이나 수정이 끝난 후 보안 취약점, 성능 병목, 가독성을 검토할 때 사용합니다.
+tools: Read, Grep, Glob
+model: sonnet
+---
+
+당신은 시니어 코드 리뷰 전문가입니다.
+파일을 절대 직접 수정하지 말고, 변경된 코드를 분석하여 다음 항목을 리포트하세요:
+1. 잠재적 버그 및 엣지 케이스
+2. 보안 및 성능 이슈
+3. 개선된 코드 스니펫 제안
+
+ * 사용법: 작업에 맞으면 Claude가 알아서 백그라운드 위임하며, 프롬프트에서 "code-reviewer 에이전트를 써서 방금 짠 모듈 검토해줘"라고 직접 지정할 수도 있습니다.
+7. 알아두면 생산성이 배가되는 필수 기능 & 단축키
+ * 메모리 초기화 (/init): 프로젝트 루트에서 /init을 실행하면 코드베이스를 분석해 최적화된 CLAUDE.md 초안을 자동 생성합니다.
+ * 컨텍스트 관리 (/compact, /clear): 대화가 길어져 토큰 소모가 커질 때 /compact를 치면 핵심 맥락만 요약해 컨텍스트를 압축합니다. 주제가 완전히 바뀌면 /clear로 초기화하세요.
+ * 외부 도구 연결 (MCP): claude mcp add <이름> <명령어>를 통해 GitHub, Jira, 사내 DB, 브라우저 제어(Playwright) 등 외부 MCP 서버를 연결할 수 있습니다.
+ * Git Worktree 병렬 작업: 여러 기능이나 버그를 동시에 고칠 때는 Git Worktree를 나누어 각각의 터미널에서 Claude Code 세션을 병렬로 띄우면 파일 충돌 없이 멀티태스킹이 가능합니다.
+ * 비대화형 파이프라인 실행 (claude -p): CI/CD나 스크립트 자동화에서는 claude -p "변경사항 요약해줘" 형태로 헤드리스(Headless) 실행이 가능합니다.
+현재 주로 사용하시는 프로젝트 환경(예: React 프론트엔드, 백엔드 API 등)에 맞춘 settings.json이나 Hooks 스크립트 템플릿을 바로 짜드릴까요?
